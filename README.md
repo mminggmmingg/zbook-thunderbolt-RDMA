@@ -99,9 +99,12 @@ git clone --recurse-submodules <이 저장소>
 | # | 단계 | 내용 |
 |---|---|---|
 | 1 | **GLM 성능 튜닝** | GLM-5.3-Flash TP=2 (현재 eager·추측 디코딩 끔 9.6~10.4 tok/s). PIECEWISE CUDA 그래프, MTP/DFlash2, reasoning 파서, 반복 시 감속(10.2 → 9.6) 원인 |
-| 2 | **halogen flash server 로 Qwen 3.8 Flash Next Q8 돌리기** | vLLM 외 두 번째 엔진 |
-| 3 | **halogen server 를 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
+| 2 | **2노드용 halogen 만들기** | [halogen](https://github.com/peonist-ai/halogen-flash-server) 은 Qwen3.8-Flash-Next 전용 엔진이지만 GPU 한 개(한 대)에서만 돈다. Q8_0(≈188 GB)은 한 대(GTT 112 GiB)에 안 들어간다. REA 로 halogen 바이너리를 분석해 두 노드(TB)에 나눠 돌게 한다(노드당 ≈94 GB). 1노드 실행도 유지. 소스가 공개된 [Strata](https://github.com/Niko1221/Strata)(MIT, GPU 간 layer split 있음)는 비교·참고용 |
+| 3 | **2노드 halogen 을 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
 | 4 | **TB 처리량 최대화** | 원래 1단계의 남은 레버: RX zero-copy, credit, kernel-bypass |
 | 5 | **다시 LLM 돌려보기** | 4 의 개선을 실제 추론으로 재검증 |
+
+halogen 은 소스 비공개(바이너리 배포)다. 라이선스는 리버스 엔지니어링을 금지하지 않고 자기 사본 수정을 허용하지만,
+수정한 이미지나 거기서 나온 커널·소스의 배포는 금지한다 — 2노드 halogen 결과물은 비공개로 둔다.
 
 그 밖에: 출력 오염 결함이 6.17 커널에서도 있었는지 확인.
