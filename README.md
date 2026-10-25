@@ -1,4 +1,4 @@
-# zbook-thunderbolt-ai
+# zbook-thunderbolt-RDMA
 
 HP ZBook Ultra G1a 두 대를 **Thunderbolt 케이블 2개**로 묶어, 한 대에 들어가지 않는 LLM 을 두 대에서 나눠 돌리는 프로젝트의
 루트 저장소다. 실제 코드는 두 서브모듈에 있고, 여기에는 둘을 묶는 실행 구성(GLM-5.3)과 진행 기록이 있다.
