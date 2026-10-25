@@ -1,0 +1,2 @@
+# 노드별 TB 제어용 IP. /etc/tbv-multirail.conf 로 설치(A=10.99.0.1, B=10.99.0.2)
+TB0_IP=10.99.0.1

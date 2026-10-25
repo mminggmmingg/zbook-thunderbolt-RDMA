@@ -1,0 +1,2 @@
+# thunderbolt netdev 생성 시 고정 IP 재적용 서비스를 띄운다(피어 리부팅 자가복구).
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="thunderbolt[0-9]*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="tbv-netdev@$name.service"

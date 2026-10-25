@@ -1,0 +1,11 @@
+# 참고 스택 클론(build-ref.sh 가 받음), 빌드·실행 산출물
+glm53/ref/
+glm53/logs/
+glm53/run/cache/
+glm53/run/so/
+glm53/run/*.log
+glm53/run/*.out
+__pycache__/
+*.bak
+*.so
+*.so.*

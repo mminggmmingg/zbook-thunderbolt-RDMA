@@ -1,0 +1,19 @@
+[Unit]
+Description=tbv multirail bring-up (patched thunderbolt RDMA, 2-cable)
+# TB 장치 인증(bolt) + 네트워크가 준비된 뒤 실행
+After=bolt.service network-online.target
+Wants=network-online.target
+# 실패 시 재시도하되 무한루프는 막는다(v1 은 StartLimitIntervalSec=0 = 무제한이었고
+# 스크립트가 항상 exit 0 이라 애초에 재시도가 발화하지 않았다)
+StartLimitIntervalSec=600
+StartLimitBurst=6
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tbv-multirail-up.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+# vllm-strix-halo:ref 위에 전송만 tbv 로 교체 → vllm-strix-halo:tbv
+#  - decode all-reduce: odl_ar2.py 자리를 libtbvcoll 래퍼로 덮음(DS4_ODL_AR2=1 훅 그대로 사용)
+#  - 큰 집합통신: RCCL 내장 IB 경로 + 호스트 tbv provider(libusb4_rdma-rdmav59.so, 실행 시 마운트)
+#  - OdinLink(odl_tb5 net plugin, odl_mq)는 쓰지 않는다: NCCL_NET_PLUGIN 미설정, DS4_ODL_MQ 미설정
+ARG BASE=vllm-strix-halo:ref
+FROM ${BASE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libibverbs-dev && rm -rf /var/lib/apt/lists/*
+COPY libtbvcoll.cpp /tmp/
+RUN cd /tmp && /opt/venv/bin/hipcc -O3 -fPIC -shared --offload-arch=gfx1151 \
+      -o /opt/venv/lib/python3.12/site-packages/libtbvcoll.so libtbvcoll.cpp -libverbs && rm -f /tmp/libtbvcoll.cpp
+COPY odl_ar2.py /opt/venv/lib/python3.12/site-packages/odl_ar2.py
+RUN rm -rf /opt/venv/lib/python3.12/site-packages/__pycache__/odl_ar2*
+# 이미지 기본 libibverbs(rdma-core 62)는 tbv provider(rdma-core 61 로 빌드)와 ibv_open_device 에서 segfault 난다.
+# 호스트(26.04, libibverbs1 61.0-2ubuntu3)와 같은 v61 을 so.1 이 가리키게 한다. v62 파일은 지우지 않고 둔다.
+COPY libibverbs.so.1.15.61.0 /usr/lib/x86_64-linux-gnu/libibverbs.so.1.15.61.0
+RUN ln -sfn libibverbs.so.1.15.61.0 /usr/lib/x86_64-linux-gnu/libibverbs.so.1
+LABEL zbrdma.transport="tbv+libtbvcoll" zbrdma.base="vllm-strix-halo:ref"

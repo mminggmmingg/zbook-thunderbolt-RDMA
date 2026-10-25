@@ -1,0 +1,8 @@
+[Unit]
+Description=tbv: thunderbolt netdev %i 고정 IP 재적용(피어 리부팅/핫플러그 자가복구)
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tbv-netdev-up.sh %i

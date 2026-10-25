@@ -1,0 +1,8 @@
+[submodule "tbv"]
+	path = tbv
+	url = https://github.com/mminggmmingg/thunderbolt-ibverbs-zbook.git
+	branch = zbook-gpu-direct-fixes
+[submodule "libtbvcoll"]
+	path = libtbvcoll
+	url = https://github.com/mminggmmingg/libtbvcoll.git
+	branch = main
