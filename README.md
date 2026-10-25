@@ -92,8 +92,16 @@ git clone --recurse-submodules <이 저장소>
 - 베이스 이미지: `kyuz0/vllm-therock-gfx1151:rocm10.0.0-torch2.11.0-vllm0.30.0`.
 - 원본 드라이버: [hellas-ai/thunderbolt-ibverbs](https://github.com/hellas-ai/thunderbolt-ibverbs).
 
-## 남은 일
+## 다음 로드맵 (2026-10-25 지정)
 
-1. GLM-5.3 성능: PIECEWISE CUDA 그래프, MTP/DFlash2 추측 디코딩, reasoning 파서. 같은 요청 반복 시 10.2 → 9.6 tok/s 로 떨어지는 원인 확인.
-2. vLLM 외 엔진(llama.cpp RPC 등) 연결.
-3. 출력 오염 결함이 6.17 커널에서도 있었는지 확인.
+원래 4단계는 기본 형태로 모두 도달했다. 이어서 이 순서로 진행한다.
+
+| # | 단계 | 내용 |
+|---|---|---|
+| 1 | **GLM 성능 튜닝** | GLM-5.3-Flash TP=2 (현재 eager·추측 디코딩 끔 9.6~10.4 tok/s). PIECEWISE CUDA 그래프, MTP/DFlash2, reasoning 파서, 반복 시 감속(10.2 → 9.6) 원인 |
+| 2 | **halogen flash server 로 Qwen 3.8 Flash Next Q8 돌리기** | vLLM 외 두 번째 엔진 |
+| 3 | **halogen server 를 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
+| 4 | **TB 처리량 최대화** | 원래 1단계의 남은 레버: RX zero-copy, credit, kernel-bypass |
+| 5 | **다시 LLM 돌려보기** | 4 의 개선을 실제 추론으로 재검증 |
+
+그 밖에: 출력 오염 결함이 6.17 커널에서도 있었는지 확인.
