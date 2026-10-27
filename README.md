@@ -63,6 +63,10 @@ tok/s(프롬프트 포함), greedy 완성 3개의 출력 해시, 고정 텍스�
 **전송별 비교** (DFlash2 k=3 + 그래프, 같은 설정): RCCL over TCP 17.3 ~ 17.4 tok/s, **tbv + libtbvcoll 20.9 ~ 21.3 (+21%)**.
 eager 때(+15%)보다 차이가 커졌다 — 계산이 줄수록 스텝에서 통신이 차지하는 몫이 커진다.
 
+**reasoning 파서**(`REASONING=1`, glm47 reasoning·tool 파서): 생각 과정은 `reasoning` 필드, 답변은 `content` 로 나뉜다.
+기본 강도(max)에서 770 토큰 중 생각 2,454자 / 답변 351자, `content` 에 `<think>` 없음, 22.2 tok/s — 속도·NLL 영향 없음.
+`chat_template_kwargs: {"reasoning_effort": "low"}` 면 생각을 거의 건너뛰고 바로 답한다.
+
 CUDA 그래프에서도 TP all-reduce 는 그래프 밖에서 eager 로 돈다(참고 스택의 `vsh-cg-eager-collectives`). 그래서 libtbvcoll 훅이 그대로 쓰인다.
 
 **시도했지만 이득이 없던 것**
@@ -81,6 +85,20 @@ k=2·3 은 4행 그래프를 쓴다. 배치 형상에 따른 커널 수치 차�
 **통신이 차지하는 몫.** libtbvcoll 구간 측정(`TBV_STATS_EVERY`)으로 디코드 all-reduce 한 번의 전송(피어 대기 포함)은 평균 ≈100 µs,
 스텝(≈109 ms)당 ≈85 회 → **통신 ≈8~9 ms(≈8%)**. 작은 메시지의 고정비(≈115 µs, tbv 커널 경로의 인터럽트·softirq)와 같은 범위라,
 더 줄이려면 드라이버 쪽(로드맵 4단계)이 필요하다. torch 프로파일러의 GPU 시간은 ROCm 에서 깨져(8 KiB 복사 커널이 8.7 ms 로 기록) 쓰지 않았다.
+
+### 다른 시스템과 비교 (GLM-5.3-Flash, 약 4비트, 1명 사용 디코드, 2026-10-27 조사)
+
+| 시스템 | 메모리 대역폭(대당) | 양자화 / 엔진 | 보고된 디코드 tok/s |
+|---|---|---|---|
+| **이 저장소: 2× Strix Halo(ZBook) + TB** | ≈256 GB/s ×2 | AWQ W4A16(≈4.7 bpw), vLLM, DFlash2 k=3 | **22.5 ~ 22.7**(생각 포함 채팅) |
+| 2× Strix Halo, [참고 스택](https://github.com/davidcanar/vllm-strix-halo) | ≈256 GB/s ×2 | AWQ W4A16, vLLM, DFlash2 k=3 | 산문 19.6~19.9 / JSON 23~27 / 도구 25~29 |
+| 2× DGX Spark, [독립 측정](https://dev.classmethod.jp/en/articles/dgx-spark-2node-glm-5-3-flash-nvfp4-vllm/) | 273 GB/s ×2 | NVFP4, vLLM, 추측 없음 → MTP k=3 | 14.6 → 26.5 |
+| 2× DGX Spark, [커뮤니티 자체 보고](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark) | 273 GB/s ×2 | NVFP4, DFlash2 k=7 | 산문 28.4 / 코드 51.9 |
+| Mac Studio M3 Ultra 256 GB ([oMLX](https://omlx.ai/benchmarks/performance/f4uqqpai), [rapid-mlx](https://rapidmlx.com/models/glm-5.3-flash)) | ≈819 GB/s | MLX 4비트 | 27.8 ~ 39.6 |
+| 1× RTX 3090/5090 + RAM 오프로드 ([strata-glm](https://github.com/sergqwer/strata-glm)) | — | NVFP4, Strata 기반 엔진 | 15 ~ 20 (llama.cpp 2.4~2.9) |
+
+비슷한 대역폭의 2× DGX Spark 와 같은 범위다. 50~60 tok/s 대 수치는 대부분 코드·구조화 출력(추측 채택률이 높음)과 k=7 에서 나왔고,
+Mac 은 한 대의 대역폭이 약 3배다. 프롬프트·양자화·k 가 서로 달라 직접 비교는 대략적이다(우리 측정은 채팅 프롬프트 하나, 채택 2.46 토큰/스텝).
 
 ## 고친 결함
 
@@ -128,7 +146,7 @@ k=2·3 은 4행 그래프를 쓴다. 배치 형상에 따른 커널 수치 차�
 
 | # | 단계 | 내용 |
 |---|---|---|
-| 1 | **GLM 성능 튜닝** — ✅ 튜닝 완료(2026-10-27) | 9.6~10.2 → **22.5~22.7 tok/s**(그래프 + DFlash2 k=3 + FP8 BMM 끔 + int8 linear). 위 "튜닝 결과" 참고. 남은 마무리: reasoning 파서 켠 서비스 구성 |
+| 1 | **GLM 성능 튜닝** — ✅ 완료(2026-10-27) | 9.6~10.2 → **22.5~22.7 tok/s**(그래프 + DFlash2 k=3 + FP8 BMM 끔 + int8 linear). 위 "튜닝 결과" 참고. reasoning 파서 확인 완료 |
 | 2 | **2노드용 halogen 만들기** | [halogen](https://github.com/peonist-ai/halogen-flash-server) 은 Qwen3.8-Flash-Next 전용 엔진이지만 GPU 한 개(한 대)에서만 돈다. Q8_0(≈188 GB)은 한 대(GTT 112 GiB)에 안 들어간다. REA 로 halogen 바이너리를 분석해 두 노드(TB)에 나눠 돌게 한다(노드당 ≈94 GB). 1노드 실행도 유지. 소스가 공개된 [Strata](https://github.com/Niko1221/Strata)(MIT, GPU 간 layer split 있음)는 비교·참고용 |
 | 3 | **2노드 halogen 을 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
 | 4 | **TB 처리량 최대화** | 원래 1단계의 남은 레버: RX zero-copy, credit, kernel-bypass |
