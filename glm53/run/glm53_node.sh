@@ -24,7 +24,7 @@ fi
 exec docker run --rm --name glm53-$ROLE --label glm53=1 \
   --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
   --network host --ipc=host --shm-size 32G --ulimit memlock=-1:-1 --security-opt seccomp=unconfined \
-  -v "$MODEL":/model:ro -v "$MOECFG":/moecfg:ro -v "$CACHE":/cache -v "$RUND":/zrun:ro \
+  -v "$MODEL":/model:ro -v "$MOECFG":/moecfg:ro -v "$CACHE":/cache -v "$RUND":/zrun:ro ${DRAFTDIR:+-v $DRAFTDIR:/draft:ro} ${ODLPY:+-v $ODLPY:/opt/venv/lib/python3.12/site-packages/odl_ar2.py:ro} \
   -e NCCL_SOCKET_IFNAME=thunderbolt0 -e GLOO_SOCKET_IFNAME=thunderbolt0 -e NCCL_NET_GDR_LEVEL=0 -e NCCL_ALGO=Ring \
   -e NCCL_DEBUG=${NCCL_DEBUG:-WARN} -e NCCL_DEBUG_SUBSYS=INIT,NET \
   -e TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=2400 -e TORCH_NCCL_ENABLE_MONITORING=0 \
@@ -33,5 +33,5 @@ exec docker run --rm --name glm53-$ROLE --label glm53=1 \
   -e PYTORCH_HIP_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.85 \
   -e TRITON_CACHE_DIR=/cache/triton -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
   -e VLLM_ROCM_USE_AITER=1 -e VLLM_ROCM_USE_AITER_MOE=0 -e VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 \
-  -e HSA_ENABLE_INTERRUPT=${HSA_INT:-1} -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-0} -e CHAT_REPS=${CHAT_REPS:-1} -e CHAT_FIRST=${CHAT_FIRST:-0} -e VLLM_TUNED_CONFIG_FOLDER=/moecfg -e VLLM_LOGGING_LEVEL=INFO \
+  -e HSA_ENABLE_INTERRUPT=${HSA_INT:-1} -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-0} -e CHAT_REPS=${CHAT_REPS:-1} -e CHAT_FIRST=${CHAT_FIRST:-0} -e EAGER=${EAGER:-1} -e CG_SIZES="${CG_SIZES:-1 2 4 8}" -e SPEC=${SPEC:-none} -e SPEC_K=${SPEC_K:-3} -e REASONING=${REASONING:-0} ${FP8BMM:+-e VLLM_ROCM_USE_AITER_FP8BMM=$FP8BMM} ${W8A16:+-e VSH_W8A16=$W8A16} -e PROF=${PROF:-0} -e TBV_STATS_EVERY=${TBV_STATS_EVERY:-0} ${TBV_CPU:+-e TBV_CPU=$TBV_CPU} ${AK:+-e VSH_ADAPTIVE_K=$AK -e VSH_ADAPTIVE_K_DEBUG=1} $( [ "${EAGER:-1}" = 0 ] && printf '%s' '-e VLLM_USE_BREAKABLE_CUDAGRAPH=1' ) -e VLLM_TUNED_CONFIG_FOLDER=/moecfg -e VLLM_LOGGING_LEVEL=INFO \
   $NET "$IMG" timeout -k 15 "$INNER_TO" bash -c "$IN"

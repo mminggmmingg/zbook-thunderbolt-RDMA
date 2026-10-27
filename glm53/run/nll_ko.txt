@@ -1,0 +1,12 @@
+## 고친 결함
+
+| 결함 | 증상 | 원인 | 수정 위치 |
+|---|---|---|---|
+| 출력 오염 | libtbvcoll ASYNC 에서 간헐적으로 문장이 깨짐 | 송신 바운스(hipMalloc, MTYPE NC)에 GPU 가 쓴 값이 `__threadfence_system` 뒤에도 NHI DMA 에 안 보임 | libtbvcoll `TBV_UNCACHED` 기본 1(송신 버퍼 비캐시) |
+| 크레딧 교착 | batch 128 에서 레일 정지(`tx_credits 0/768`) | raw stream 중 제어 큐(크레딧 반환)가 막히는데 시작 크레딧은 32 만 요구 | tbv `kernel/path.c` (8ee9b96) |
+| 부팅 30초 지연 | 케이블 없이 부팅하면 30초 멈춤 | bring-up 스크립트가 피어 없이 링크를 기다림 | [`host/sbin/tbv-multirail-up.sh`](host/) v3 |
+| 독 연결 후 종료 멈춤 | TB 독을 꽂았다 뺀 뒤 재부팅이 영원히 멈춤 | DP 터널 DPRX 취소 시 도메인 참조 누수 + OEM 커널이 백포트한 `domain_released` 대기 | 업스트림 v7.3 수정 3개 백포트 (tbv `kernel-workflow/patches`, b9a5032). Launchpad 에 신고 |
+| ibverbs segfault | 컨테이너 안 RCCL 이 `ibv_open_device` 에서 죽음 | 이미지 libibverbs(rdma-core 62) ↔ provider(61 빌드) 내부 구조 불일치 | 이미지에 v61 내장 (`glm53/image/Dockerfile.tbv`) |
+| 요청 경계 정지 | GLM-5.3 에서 새 요청 prefill 직후 GPU 영구 대기 | 호스트가 슬롯 재사용 때 `rails_done` 을 지워, 1레일 디코드→2레일 prefill 전환에서 rail1 완료가 누락 → gflag 미기록 | libtbvcoll (deaa5b2). GPU 발자국 진단으로 확인 |
+
+## GLM-5.3 재현

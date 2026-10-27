@@ -1,0 +1,26 @@
+libtbvcoll: fix rails_done race that hung ASYNC mode at request boundaries
+
+The host reset rails_done[slot]=0 when enqueuing the next item for a slot
+(seq+NSLOT). Admission only checks each rail's queue depth, and small
+(<=96 KiB, 1-rail) decode items never fill rail1's queue, so right after a
+switch to 2-rail prefill the host could reset the counter while rail1 was
+still finishing seq. The count then never reached R, gflag[slot] was never
+written, and the GPU waited forever.
+
+Seen with vLLM TP=2 GLM-5.3-Flash: hang at the first prefill of a later
+request, ASYNC only (SYNC never uses the counter). GPU breadcrumbs showed
+both rails had finished seq while gflag[slot] still held seq-NSLOT.
+
+Fix: the host no longer touches rails_done; the last rail resets it to 0
+before releasing gflag. Items of the next round in that slot cannot start
+counting earlier, because their copy kernel runs only after the GPU passes
+this gflag.
+
+Verified: plain ASYNC, 4 chat + 3 completion requests (6 boundaries),
+completion hashes identical to the TCP baseline, no kernel anomalies.
+
+Also adds diagnostics used to find it: TBV_WDOG (watchdog seconds),
+TBV_KWAIT (spin-kernel wait + GPU breadcrumbs printed by the watchdog),
+long copy-flag wait and new-stream logging.
+
+

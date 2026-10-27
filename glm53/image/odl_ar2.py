@@ -41,6 +41,13 @@ class OdlAllReduce2:
         self._lib = lib
         self._fn = lib.tbv_ar_allreduce
         self.max_bytes = lib.tbv_ar_cap()
+        # TBV_STATS_EVERY=N: N 번 호출마다 libtbvcoll 구간별 평균(us)을 남긴다(읽으면 리셋).
+        # pre=SYNC 대기, xfer=진행스레드 전송(피어 대기 포함), post=가산 런치, enq=호출자 체류, drain=송신 수거
+        self._every = int(os.environ.get("TBV_STATS_EVERY", "0"))
+        self._n = 0
+        self._rank = rank
+        if self._every:
+            lib.tbv_ar_stats5.argtypes = [ctypes.POINTER(ctypes.c_double)] * 5 + [ctypes.POINTER(ctypes.c_ulonglong)]
 
     def eligible(self, t: torch.Tensor) -> bool:
         return (
@@ -60,4 +67,11 @@ class OdlAllReduce2:
                       ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
         if rc != 0:   # -2(cap 초과)는 eligible 에서 걸러지므로 여기 오면 실제 오류
             raise RuntimeError(f"tbv_ar_allreduce 실패 rc={rc}")
+        if self._every:
+            self._n += 1
+            if self._n % self._every == 0:
+                v = [ctypes.c_double() for _ in range(5)]; c = ctypes.c_ulonglong()
+                self._lib.tbv_ar_stats5(*[ctypes.byref(x) for x in v], ctypes.byref(c))
+                print(f"[tbvstat] rank{self._rank} n={c.value} pre={v[0].value:.1f} xfer={v[1].value:.1f} "
+                      f"post={v[2].value:.1f} enq={v[3].value:.1f} drain={v[4].value:.1f} us", flush=True)
         return out

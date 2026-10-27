@@ -23,7 +23,7 @@ git clone --recurse-submodules <이 저장소>
 | 메모리 | BIOS VRAM 4 GiB, GTT 112 GiB (`ttm.pages_limit=29360128`) | 같음 |
 | 링크 | Thunderbolt 케이블 2개 → RDMA 레일 `usb4_rdma0`, `usb4_rdma5` + 제어용 IP `thunderbolt0` 10.99.0.1 / 10.99.0.2 | |
 
-## 로드맵 진행 상황 (2026-10-25)
+## 로드맵 진행 상황 (2026-10-27)
 
 진행 순서는 2 → 3 → 1 → 4.
 
@@ -32,7 +32,7 @@ git clone --recurse-submodules <이 저장소>
 | **2. LLM TP 벤치마크** | ✅ 완료 | RCCL all-reduce 를 tbv 위에서 실행한 뒤, 자체 all-reduce(libtbvcoll)로 NCCL 보다 빠르게 |
 | **3. 실제 LLM 추론** | ✅ 도달 | GLM-5.3-Flash(177.7 GiB, 한 대에 안 들어감)를 vLLM serve(OpenAI API)로 두 대에서 실행, 출력 정상 |
 | **1. TB 처리량** | 🔶 상당 부분 | 67 MiB/s 에서 시작 → 2레일 합산 약 20 Gb/s. RX zero-copy·kernel-bypass 는 보류 |
-| **4. 링크 2개로 분산 추론** | 🔶 동작 | GLM-5.3 이 두 레일 위에서 실행(RCCL·libtbvcoll 모두 2레일). 남은 일은 성능 |
+| **4. 링크 2개로 분산 추론** | ✅ 동작 | GLM-5.3 이 두 레일 위에서 22.5~22.7 tok/s(TCP 대비 +21%). RCCL·libtbvcoll 모두 2레일 |
 
 최종 목표 중 **vLLM 외 엔진(llama.cpp, diffusion 등)** 연결은 아직 시작하지 않았다.
 
@@ -46,16 +46,41 @@ git clone --recurse-submodules <이 저장소>
 | 32 | 421 ~ 444 | 626 ~ 639 |
 | 128 | 749 ~ 887 | 1174 ~ 1182 |
 
-### GLM-5.3-Flash Uncensored AWQ (W4A16), vLLM TP=2
+### GLM-5.3-Flash Uncensored AWQ (W4A16), vLLM TP=2 — 튜닝 결과 (2026-10-27)
 
-랭크당 가중치 82.75 GiB, KV 4 GiB, 최대 문맥 32K. **eager 실행, 추측 디코딩 끔** 상태의 기준값.
+랭크당 가중치 82.75 GiB, KV 4 GiB, 최대 문맥 32K. 측정은 `glm53/run/probe.py`: 같은 채팅 요청(256 토큰, 프롬프트 46 토큰) 4회의
+tok/s(프롬프트 포함), greedy 완성 3개의 출력 해시, 고정 텍스트 2개의 프롬프트 NLL. 모든 실행에서 양 노드 커널 이상 0.
 
-| 전송 | 채팅 256 토큰 | 출력 |
+| 단계 (누적) | 채팅 tok/s | 출력 |
 |---|---|---|
-| RCCL over TCP (thunderbolt0) | 8.9 tok/s | 기준 |
-| RCCL over tbv IB + libtbvcoll | **9.6 ~ 10.4 tok/s** | greedy 완성 3개 해시가 TCP 와 동일 |
+| eager, 추측 디코딩 끔 | 9.6 ~ 10.2 | 기준 해시 |
+| + PIECEWISE CUDA 그래프 | 11.9 ~ 12.1 | 해시 동일. eager 의 반복 감속(10.2 → 9.6)도 사라짐 |
+| + MTP 추측 디코딩 k=3 | 19.0 ~ 19.7 | 해시 동일 |
+| + DFlash2 drafter k=3 (MTP 대신) | 20.9 ~ 21.3 | 해시 동일 |
+| + `VLLM_ROCM_USE_AITER_FP8BMM=0` | 21.8 ~ 22.3 | 수치 변경(해시 달라짐), NLL ±1% 이내 |
+| **+ `VSH_W8A16=1` (최종)** | **22.5 ~ 22.7 (≈2.2×)** | NLL 영 3.59 / 한 2.81 (기준 3.62 / 2.79) |
 
-참고 스택은 CUDA 그래프 + MTP/DFlash2 추측 디코딩으로 20~28 tok/s 를 보고한다 — 다음 작업.
+**전송별 비교** (DFlash2 k=3 + 그래프, 같은 설정): RCCL over TCP 17.3 ~ 17.4 tok/s, **tbv + libtbvcoll 20.9 ~ 21.3 (+21%)**.
+eager 때(+15%)보다 차이가 커졌다 — 계산이 줄수록 스텝에서 통신이 차지하는 몫이 커진다.
+
+CUDA 그래프에서도 TP all-reduce 는 그래프 밖에서 eager 로 돈다(참고 스택의 `vsh-cg-eager-collectives`). 그래서 libtbvcoll 훅이 그대로 쓰인다.
+
+**시도했지만 이득이 없던 것**
+
+| 시도 | 결과 |
+|---|---|
+| 추측 길이 MTP k=2 / k=4, DFlash2 k=7 | 17.8 / 14.5~14.9 / 14.1~15.1 tok/s — k=3 이 최적 |
+| 적응형 추측 길이(`VSH_ADAPTIVE_K=ema`, k ∈ {1,2,3}) | 22.3~22.5 — 차이 없음(참고 스택과 같은 결론) |
+| libtbvcoll 진행 스레드 CPU 고정(`TBV_CPU=30`) | 22.4~22.7, 전송 97.7 → 101.5 µs — 차이 없음 |
+| iGPU 클럭 상한(참고 스택의 2100 MHz) | 하드웨어 설정은 건드리지 않기로 해서 적용 안 함 |
+
+**8행 검증 그래프에서 greedy 출력이 달라짐(미해결).** MTP k=4 와 DFlash2 k=7 은 drafter·k 가 다른데도 똑같은 3개의 다른 출력을
+냈고, TCP 로 돌려도 같았다 — 전송(tbv·libtbvcoll)과 drafter 는 원인이 아니다. 둘 다 본 모델이 8행 그래프로 검증하고, 정상인
+k=2·3 은 4행 그래프를 쓴다. 배치 형상에 따른 커널 수치 차이로 보이며(vLLM 은 배치 불변성을 보장하지 않음), 최종 설정 k=3 은 해당 없음.
+
+**통신이 차지하는 몫.** libtbvcoll 구간 측정(`TBV_STATS_EVERY`)으로 디코드 all-reduce 한 번의 전송(피어 대기 포함)은 평균 ≈100 µs,
+스텝(≈109 ms)당 ≈85 회 → **통신 ≈8~9 ms(≈8%)**. 작은 메시지의 고정비(≈115 µs, tbv 커널 경로의 인터럽트·softirq)와 같은 범위라,
+더 줄이려면 드라이버 쪽(로드맵 4단계)이 필요하다. torch 프로파일러의 GPU 시간은 ROCm 에서 깨져(8 KiB 복사 커널이 8.7 ms 로 기록) 쓰지 않았다.
 
 ## 고친 결함
 
@@ -76,10 +101,15 @@ git clone --recurse-submodules <이 저장소>
    glm53/image/build-ref.sh         # 참고 스택 그대로 → vllm-strix-halo:ref (vLLM 73859fec 소스 빌드, ~12분)
    glm53/image/build-tbv-image.sh   # 전송 교체 → vllm-strix-halo:tbv
    ```
-3. 실행 (A 에서, 양 노드 컨테이너를 띄우고 시험 요청 후 종료):
+3. DFlash2 drafter: `incoai/GLM-5.3-Flash-DFlash2`(2.18 GiB, CC BY-NC-ND 4.0)를 양 노드 모델 폴더 옆에 둔다.
+4. 실행 (A 에서, 양 노드 컨테이너를 띄우고 시험 요청 후 종료). 최종 설정:
    ```
-   MODE=tbv glm53/run/run_tp2.sh    # MODE=tcp 는 비교용 기준선
+   MODE=tbv EAGER=0 SPEC=dflash SPEC_K=3 FP8BMM=0 W8A16=1 glm53/run/run_tp2.sh
    ```
+   손잡이: `MODE=tcp`(비교 기준선), `EAGER=1`(그래프 끔), `SPEC=none|mtp|dflash`, `REASONING=1`(생각 과정 분리 파서),
+   `PROF=1`(torch 프로파일러), `TBV_STATS_EVERY=N`(libtbvcoll 구간 시간), `CHAT_REPS`, `CHAT_FIRST`.
+   `TBV_STATS_EVERY` 는 이 저장소의 `glm53/image/odl_ar2.py` 가 들어간 이미지가 필요하다 — `build-tbv-image.sh` 로 다시 빌드하거나,
+   `ODLPY=1` 로 그 파일을 마운트한다(B 에는 `~/glm53-run/odl_ar2.py` 로 복사해 둔다).
    양 노드 커널 로그에 tbv/TB 이상이 찍히면 즉시 두 컨테이너를 정리하고, 컨테이너 안에 시간 제한이 있다.
    (호스트 쪽 timeout 만 쓰면 B 컨테이너가 멈춘 QP 를 붙잡고 남아, 케이블 재연결 때 커널 손상까지 간 적이 있다.)
 
@@ -98,7 +128,7 @@ git clone --recurse-submodules <이 저장소>
 
 | # | 단계 | 내용 |
 |---|---|---|
-| 1 | **GLM 성능 튜닝** | GLM-5.3-Flash TP=2 (현재 eager·추측 디코딩 끔 9.6~10.4 tok/s). PIECEWISE CUDA 그래프, MTP/DFlash2, reasoning 파서, 반복 시 감속(10.2 → 9.6) 원인 |
+| 1 | **GLM 성능 튜닝** — ✅ 튜닝 완료(2026-10-27) | 9.6~10.2 → **22.5~22.7 tok/s**(그래프 + DFlash2 k=3 + FP8 BMM 끔 + int8 linear). 위 "튜닝 결과" 참고. 남은 마무리: reasoning 파서 켠 서비스 구성 |
 | 2 | **2노드용 halogen 만들기** | [halogen](https://github.com/peonist-ai/halogen-flash-server) 은 Qwen3.8-Flash-Next 전용 엔진이지만 GPU 한 개(한 대)에서만 돈다. Q8_0(≈188 GB)은 한 대(GTT 112 GiB)에 안 들어간다. REA 로 halogen 바이너리를 분석해 두 노드(TB)에 나눠 돌게 한다(노드당 ≈94 GB). 1노드 실행도 유지. 소스가 공개된 [Strata](https://github.com/Niko1221/Strata)(MIT, GPU 간 layer split 있음)는 비교·참고용 |
 | 3 | **2노드 halogen 을 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
 | 4 | **TB 처리량 최대화** | 원래 1단계의 남은 레버: RX zero-copy, credit, kernel-bypass |
