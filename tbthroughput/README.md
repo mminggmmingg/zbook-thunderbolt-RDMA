@@ -13,7 +13,8 @@
 | `lanes_set.sh` | `lanes` 변경 + 재적재(sudo, 설정 백업) |
 | `ab/swap.sh`, `ab/measure.sh` | 같은 부팅에서 tbv 모듈 이전/새 교체(sudo)와 한 상태 측정 |
 | `coll/` | libtbvcoll 끝단 all-reduce 벤치 — `libtbvcoll/step4/libtbvcoll.cpp` 로 `libtbvcoll.so` 를 빌드해 `tbvcoll.py` 와 같은 폴더에 둔다 |
-| `deploy/install-sendskip.sh` | 송신 취소 스캔 생략 수정본(tbv 4110684) 설치 스크립트 |
+| `deploy/install-sendskip.sh` | 송신 취소 스캔 생략 1차 수정본(tbv 4110684) 설치 스크립트 |
+| `verify/rdma_verify.c` | RC WRITE/READ 무결성 시험(무작위 길이·비정렬 오프셋·여러 QP 가 한 MR 공유·보호 바이트). `gcc -O2 -o rdma_verify rdma_verify.c -libverbs` |
 
 tbv 모듈 빌드 주의: 로드된 패치 thunderbolt.ko 와 **같은 소스 트리의 헤더와 Module.symvers** 로 빌드한다.
 스톡 `/usr/src/linux-headers-*/include/linux/thunderbolt.h` 에는 패치 필드(`callback_xd` 등)가 없어, 심볼 CRC 를 억지로 맞춘 모듈은 커널 oops 를 낸다(NOTES.md §5).
