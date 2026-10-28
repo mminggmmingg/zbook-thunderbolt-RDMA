@@ -13,6 +13,7 @@ git clone --recurse-submodules <이 저장소>
 | [`libtbvcoll/`](https://github.com/mminggmmingg/libtbvcoll) | **libtbvcoll** — tbv 위의 2랭크 TP all-reduce 라이브러리(HIP, gfx1151). vLLM 의 디코드 all-reduce 를 NCCL 대신 처리 |
 | [`glm53/`](glm53/) | GLM-5.3-Flash TP=2 실행 구성 — 참고 스택 이미지 위에 전송만 tbv+libtbvcoll 로 바꾼 오버레이, 2노드 실행기 |
 | [`host/`](host/) | 양 노드에 설치된 bring-up 스크립트·systemd·udev·모듈 옵션 |
+| [`tbthroughput/`](tbthroughput/) | 로드맵 4단계(TB 처리량) 측정 도구와 기록 — perftest 행렬, 송신 CPU 프로파일, 같은 부팅 A/B 모듈 교체 |
 
 ## 구성
 
@@ -149,7 +150,7 @@ Mac 은 한 대의 대역폭이 약 3배다. 프롬프트·양자화·k 가 서�
 | 1 | **GLM 성능 튜닝** — ✅ 완료(2026-10-27) | 9.6~10.2 → **22.5~22.7 tok/s**(그래프 + DFlash2 k=3 + FP8 BMM 끔 + int8 linear). 위 "튜닝 결과" 참고. reasoning 파서 확인 완료 |
 | 2 | **2노드용 halogen 만들기** — 🔶 진행 중 | [halogen](https://github.com/peonist-ai/halogen-flash-server) 은 Qwen3.8-Flash-Next 전용 엔진이지만 GPU 한 개(한 대)에서만 돈다. Q8_0(≈188 GB)은 한 대(GTT 112 GiB)에 안 들어간다. REA 로 halogen 바이너리를 분석해 두 노드(TB)에 나눠 돌게 한다(노드당 ≈94 GB). 1노드 실행도 유지. 소스가 공개된 [Strata](https://github.com/Niko1221/Strata)(MIT, GPU 간 layer split 있음)는 비교·참고용 |
 | 3 | **2노드 halogen 을 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
-| 4 | **TB 처리량 최대화** | 원래 1단계의 남은 레버: RX zero-copy, credit, kernel-bypass |
+| 4 | **TB 처리량 최대화** — 🔶 진행 중 | 송신 프로파일로 찾은 병목(정상 send 완료마다 링 전체 취소 스캔) 수정 → tbv `4110684`. 같은 부팅 A/B: perftest 2케이블 단방향 1 MiB 7.8→19.0, 양방향 1 MiB 12.0→28.1, 양방향 64 KiB 32.7→44.1 Gb/s. libtbvcoll all-reduce 는 그대로(4 MiB ≈23 Gb/s = 케이블당 방향당 ≈11–12 Gb/s 상한). in-flight 64→512 효과 없음, lanes=2 는 thunderbolt0 링 부족으로 보류. 기록: [`tbthroughput/NOTES.md`](tbthroughput/NOTES.md) |
 | 5 | **다시 LLM 돌려보기** | 4 의 개선을 실제 추론으로 재검증 |
 
 5단계 다음에는 Strata·Gufo·halogen 의 장점을 합쳐 CPU·GPU·NPU 를 함께 쓰는 자체 LLM 엔진을 만든다(구상 단계).
