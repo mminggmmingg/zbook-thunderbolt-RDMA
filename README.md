@@ -151,7 +151,7 @@ Mac 은 한 대의 대역폭이 약 3배다. 프롬프트·양자화·k 가 서�
 | 2 | **2노드용 halogen 만들기** — 🔶 진행 중 | [halogen](https://github.com/peonist-ai/halogen-flash-server) 은 Qwen3.8-Flash-Next 전용 엔진이지만 GPU 한 개(한 대)에서만 돈다. Q8_0(≈188 GB)은 한 대(GTT 112 GiB)에 안 들어간다. REA 로 halogen 바이너리를 분석해 두 노드(TB)에 나눠 돌게 한다(노드당 ≈94 GB). 1노드 실행도 유지. 소스가 공개된 [Strata](https://github.com/Niko1221/Strata)(MIT, GPU 간 layer split 있음)는 비교·참고용 |
 | 3 | **2노드 halogen 을 우리 하드웨어에 맞게 튜닝** | 2×ZBook, gfx1151, TB 2레일 |
 | 4 | **TB 처리량 최대화** — ✅ 송신 경로 정리 완료(2026-10-29) | 송신 프로파일로 찾은 병목 3개를 tbv 에서 고침: 정상 완료마다 링 전체 취소 스캔(`4110684`), 두 번째 컨트롤러에서 그 생략이 안 되던 경우(`4c5512b`), MR 복사가 프레임마다 sg 목록을 처음부터 페이지 단위로 걷던 것(`c3429d7`). 2케이블 양방향 1 MiB 1/4 QP 12.0·13.6 → **45.2·45.0 Gb/s**, 단방향 1 MiB 7.8 → 21.5. 이제 크기·QP·방향과 무관하게 케이블당 방향당 ≈11 Gb/s(링 하나의 상한). 무결성 시험(`verify/rdma_verify.c`) 불일치 0. libtbvcoll all-reduce 는 원래 그 상한에 붙어 있어 그대로(4 MiB ≈21–23 Gb/s). 상한을 더 올리려면 케이블당 링 2개(lanes=2, thunderbolt0 링 충돌로 보류). 기록: [`tbthroughput/NOTES.md`](tbthroughput/NOTES.md) |
-| 5 | **다시 LLM 돌려보기** | 4 의 개선을 실제 추론으로 재검증 |
+| 5 | **다시 LLM 돌려보기** — ✅ GLM 재실행(2026-10-29) | 새 tbv(`c3429d7`)로 GLM-5.3 같은 설정: 22.31–22.61 tok/s(이전 22.48–22.71), greedy 해시·NLL 비트 동일. 디코드 통신은 8 KiB all-reduce(얕은 큐)라 4단계 수정이 겨냥한 병목을 밟지 않아 변화 없음 — 예상대로. 다음 레버는 모델 안 all-reduce 1회 ≈100 µs vs 단독 ≈20 µs 의 차이. 두 노드가 다른 망일 때 vLLM 초기화가 멈추던 것은 `VLLM_HOST_IP`=TB IP 로 해결 |
 
 5단계 다음에는 Strata·Gufo·halogen 의 장점을 합쳐 CPU·GPU·NPU 를 함께 쓰는 자체 LLM 엔진을 만든다(구상 단계).
 NPU 쪽은 전원·클럭 설정을 바꿔야 하는 부분이 있어, 하드웨어 설정을 건드리지 않는 범위에서 검토한다.

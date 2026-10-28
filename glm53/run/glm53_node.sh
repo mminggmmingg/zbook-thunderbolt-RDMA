@@ -7,6 +7,9 @@ set -uo pipefail
 ROLE="$1"
 MODE="${MODE:-tcp}"; INNER_TO="${INNER_TO:-1800}"; IMG="${IMG:-vllm-strix-halo:tbv}"
 HEAD_IP=10.99.0.1
+# vLLM 의 노드 간 메시지 큐(zmq)·분산 초기화가 기본경로(Wi-Fi) IP 를 고르면, 두 노드가 다른 망에 있을 때 상대가 닿지 못해
+# 초기화에서 멈춘다(2026-10-29, A 192.168.0.199 / B 10.197.2.40). TB IP 를 명시한다.
+SELF_IP=$([ "$ROLE" = head ] && echo "$HEAD_IP" || echo "${PEER_SELF:?worker 는 PEER_SELF 필요}")
 case "$MODE" in
   tcp) NET="-e NCCL_IB_DISABLE=1 -e DS4_ODL_AR2=0" ;;
   tbv) NET="-e NCCL_IB_DISABLE=0 -e NCCL_IB_HCA=usb4_rdma0,usb4_rdma5 -e NCCL_IB_GID_INDEX=1 -e NCCL_IB_MERGE_NICS=0 -e NCCL_MAX_NCHANNELS=2 -e NCCL_MIN_NCHANNELS=2 -e NCCL_CROSS_NIC=1 -e DS4_ODL_AR2=${AR2:-1}
@@ -25,7 +28,7 @@ exec docker run --rm --name glm53-$ROLE --label glm53=1 \
   --device=/dev/kfd --device=/dev/dri --group-add video --group-add render \
   --network host --ipc=host --shm-size 32G --ulimit memlock=-1:-1 --security-opt seccomp=unconfined \
   -v "$MODEL":/model:ro -v "$MOECFG":/moecfg:ro -v "$CACHE":/cache -v "$RUND":/zrun:ro ${DRAFTDIR:+-v $DRAFTDIR:/draft:ro} ${ODLPY:+-v $ODLPY:/opt/venv/lib/python3.12/site-packages/odl_ar2.py:ro} \
-  -e NCCL_SOCKET_IFNAME=thunderbolt0 -e GLOO_SOCKET_IFNAME=thunderbolt0 -e NCCL_NET_GDR_LEVEL=0 -e NCCL_ALGO=Ring \
+  -e VLLM_HOST_IP=$SELF_IP -e NCCL_SOCKET_IFNAME=thunderbolt0 -e GLOO_SOCKET_IFNAME=thunderbolt0 -e NCCL_NET_GDR_LEVEL=0 -e NCCL_ALGO=Ring \
   -e NCCL_DEBUG=${NCCL_DEBUG:-WARN} -e NCCL_DEBUG_SUBSYS=INIT,NET \
   -e TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=2400 -e TORCH_NCCL_ENABLE_MONITORING=0 \
   -e RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 -e RAY_memory_monitor_refresh_ms=0 -e RAY_memory_usage_threshold=0.99 \
