@@ -27,6 +27,8 @@ for i in $(seq 600); do curl -sf http://127.0.0.1:$PORT/health > /dev/null && br
 curl -sf http://127.0.0.1:$PORT/health > /dev/null || { echo "server not ready"; tail -20 "$OUT/server.log"; }
 python3 -I "$D/tools/spec_bench.py" http://127.0.0.1:$PORT "$D/eval/spec_prompts.json" "$NMAX" "$OUT/results.jsonl" | tee "$OUT/bench.txt"
 grep -iE 'draft|mtp|spec' "$OUT/server.log" | grep -v '^\s*$' | head -6
+# llama-server 를 먼저 내리고(끝날 때 RPC 서버에 메모리를 묻는다) 그다음 RPC 서버
+SP=$(tail -1 "$OUT/pids"); kill $SP 2>/dev/null; while kill -0 $SP 2>/dev/null; do sleep 1; done
 xargs -r kill < "$OUT/pids" 2>/dev/null
 # 다음 실행이 메모리 부족을 겪지 않게, 프로세스가 끝나 GPU 메모리를 돌려줄 때까지 기다린다
 for p in $(cat "$OUT/pids"); do while kill -0 $p 2>/dev/null; do sleep 1; done; done; sleep 3
