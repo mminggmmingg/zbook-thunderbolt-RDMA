@@ -21,6 +21,7 @@ export GGML_RDMA_CHUNK=${GGML_RDMA_CHUNK:-65536}   # 64 KiB × 48 수신 칸 + 4
 export GGML_RDMA_RX_DEPTH=${GGML_RDMA_RX_DEPTH:-48}
 export GGML_RDMA_TX_SLOTS=${GGML_RDMA_TX_SLOTS:-4}
 SRV_ENV=${SRV_ENV-GGML_CUDA_DISABLE_GRAPHS=1}  # HIP 그래프 끔: 전체 어텐션 부분그래프에서 hipGraphLaunch 가 ≈620 µs GPU 를 멈춤(RESULTS.md GPU 활용)
+export GGML_RPC_COMM_OVERLAP=${GGML_RPC_COMM_OVERLAP:-2}  # AR 뒤 발행 겹치기 2(도우미 수신). 3 은 정확하지만 이 APU 에서 GPU 클럭이 떨어져 느림(RESULTS.md)
 export LLAMA_TP_FFN_GRAN=${LLAMA_TP_FFN_GRAN:-32}  # 전문가 FFN 폭 640 을 320/320 으로(기본 128 알갱이면 층마다 256/384) — RESULTS.md 로드맵 a
 
 TRA=""; TRB=""
