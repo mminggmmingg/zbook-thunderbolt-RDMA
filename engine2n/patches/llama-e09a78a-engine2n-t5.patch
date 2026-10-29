@@ -29,7 +29,7 @@ index 72e961d..4b76613 100644
          return (void *)ggml_backend_cuda_comm_init;
      }
 diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
-index 8cedee7..da70742 100644
+index 8cedee7..bfe073a 100644
 --- a/ggml/src/ggml-rpc/ggml-rpc.cpp
 +++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
 @@ -1388,6 +1388,63 @@ void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device,
@@ -125,12 +125,13 @@ index 8cedee7..da70742 100644
  
      std::vector<ggml_backend_t> backends;
      const char * cache_dir;
-@@ -2284,6 +2355,57 @@ bool rpc_server::comm_init(const rpc_msg_comm_init_req & request, rpc_msg_comm_i
+@@ -2284,6 +2355,76 @@ bool rpc_server::comm_init(const rpc_msg_comm_init_req & request, rpc_msg_comm_i
      return true;
  }
  
 +// GGML_RPC_COMM_PROF=1: per-stage timing of the pairwise allreduce, summed and printed every N calls
 +// (N = value if > 1, else 1000). gap = time since the previous allreduce returned (graph compute + command decode).
++// GGML_RPC_COMM_PROF_TRACE=<file>: also keep the last 4096 calls (gap, sync, net, wire bytes) and rewrite <file> at each print.
 +struct comm_prof_state {
 +    int      every = -1;
 +    uint64_t n = 0, bytes = 0;
@@ -140,6 +141,8 @@ index 8cedee7..da70742 100644
 +    int64_t  t_wait = 0;
 +    int64_t  t_cmd[RPC_CMD_COUNT] = {};
 +    uint64_t n_cmd[RPC_CMD_COUNT] = {};
++    const char * trace_path = nullptr;
++    std::vector<std::array<int64_t, 4>> trace;
 +};
 +static comm_prof_state g_comm_prof;
 +static int comm_prof_every() {
@@ -147,13 +150,19 @@ index 8cedee7..da70742 100644
 +        const char * env = getenv("GGML_RPC_COMM_PROF");
 +        const int v = env ? atoi(env) : 0;
 +        g_comm_prof.every = v <= 0 ? 0 : v == 1 ? 1000 : v;
++        g_comm_prof.trace_path = getenv("GGML_RPC_COMM_PROF_TRACE");
++        if (g_comm_prof.trace_path != nullptr) {
++            g_comm_prof.trace.resize(4096);
++        }
 +    }
 +    return g_comm_prof.every;
 +}
 +static void comm_prof_add(int64_t t_entry, int64_t t_end, int64_t sync, int64_t d2h, int64_t net, int64_t h2d, size_t wire_bytes) {
 +    comm_prof_state & p = g_comm_prof;
-+    if (p.last_end != 0) {
-+        p.t_gap += t_entry - p.last_end;
++    const int64_t gap = p.last_end != 0 ? t_entry - p.last_end : 0;
++    p.t_gap += gap;
++    if (!p.trace.empty()) {
++        p.trace[p.n % p.trace.size()] = {gap, sync, net, (int64_t) wire_bytes};
 +    }
 +    p.t_sync += sync; p.t_d2h += d2h; p.t_net += net; p.t_h2d += h2d;
 +    p.bytes += wire_bytes;
@@ -171,6 +180,16 @@ index 8cedee7..da70742 100644
 +            }
 +        }
 +        LOG_INFO("[comm_prof]   per allreduce: wait-for-cmd %.1fus |%s\n", p.t_wait * k, per_cmd.c_str());
++        if (!p.trace.empty()) {
++            if (FILE * f = fopen(p.trace_path, "w")) {
++                const uint64_t m = std::min<uint64_t>(p.n, p.trace.size());
++                for (uint64_t i = p.n - m; i < p.n; i++) {
++                    const auto & e = p.trace[i % p.trace.size()];
++                    fprintf(f, "%llu %lld %lld %lld %lld\n", (unsigned long long) i, (long long) e[0], (long long) e[1], (long long) e[2], (long long) e[3]);
++                }
++                fclose(f);
++            }
++        }
 +        p.t_gap = p.t_sync = p.t_d2h = p.t_net = p.t_h2d = 0; p.bytes = 0;
 +        p.t_wait = 0;
 +        for (int c = 0; c < RPC_CMD_COUNT; c++) {
@@ -183,7 +202,7 @@ index 8cedee7..da70742 100644
  bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
      if (request.device >= backends.size()) {
          return false;
-@@ -2294,6 +2416,12 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2294,6 +2435,12 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
          return false;
      }
      ggml_backend_t backend = backends[request.device];
@@ -196,7 +215,7 @@ index 8cedee7..da70742 100644
  
      size_t ctx_size = 16*ggml_tensor_overhead() + 2*ggml_graph_overhead_custom(8, false);
      struct ggml_init_params params = {
-@@ -2320,12 +2448,34 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2320,12 +2467,34 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
      const size_t wire_bytes = wire_bf16 ? (size_t) ne*2 : nbytes;
      const size_t need       = wire_bf16 ? 2*nbytes : nbytes;
      if (state.scratch_size < need) {
@@ -233,7 +252,7 @@ index 8cedee7..da70742 100644
  
      auto new_scratch_tensor = [&](ggml_type type, size_t offset) {
          ggml_tensor * t = ggml_new_tensor_4d(ctx, type, t_dst->ne[0], t_dst->ne[1], t_dst->ne[2], t_dst->ne[3]);
-@@ -2352,41 +2502,116 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2352,41 +2521,116 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
          GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
      };
  
@@ -366,7 +385,7 @@ index 8cedee7..da70742 100644
      }
  
      ggml_tensor * t_red = ggml_new_tensor_4d(ctx, t_dst->type, t_dst->ne[0], t_dst->ne[1], t_dst->ne[2], t_dst->ne[3]);
-@@ -2402,6 +2627,36 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2402,6 +2646,36 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
      } else {
          compute_nodes(t_red, nullptr);
      }
@@ -403,7 +422,7 @@ index 8cedee7..da70742 100644
      return true;
  }
  
-@@ -2474,10 +2729,31 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+@@ -2474,10 +2748,31 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
      // Activate transport upgrade using client's caps
      sock->update_caps(req.conn_caps);
      LOG_DBG("[%s] client connected, transport: %s\n", __func__, sock->transport_name());
@@ -674,3 +693,69 @@ index d5670f3..4fc248a 100644
  #endif
      return true;
  }
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 81af890..e00bf28 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -398,6 +398,19 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
+     return llama_model_create(arch, params);
+ }
+ 
++// engine2n: overrides for the FFN tensors only (env), other tensors keep --tensor-split and their granularity
++//   LLAMA_TP_FFN_GRAN=<n>   FFN slice granularity (combined with the quant block size), default 128.
++//                           an FFN width of 640 at 128 splits 256/384 per layer, so every FFN all-reduce waits for the 60% side
++//   LLAMA_TP_FFN_SPLIT=<f>  share of device 0 for the FFN tensors when there are 2 devices
++static int64_t llama_tp_ffn_gran() {
++    static const int64_t v = [] { const char * e = getenv("LLAMA_TP_FFN_GRAN"); return e ? std::max<int64_t>(1, atoll(e)) : 128; }();
++    return v;
++}
++static float llama_tp_ffn_split() {
++    static const float v = [] { const char * e = getenv("LLAMA_TP_FFN_SPLIT"); return e ? (float) atof(e) : -1.0f; }();
++    return v;
++}
++
+ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata) {
+     const llama_meta_device_get_split_state_userdata * ud = (const llama_meta_device_get_split_state_userdata *) userdata;
+     const llama_hparams & hparams = ud->model->hparams;
+@@ -852,7 +865,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+                 std::regex_match(tensor_name, pattern_ffn_up_shexp_weight) ||
+                 std::regex_match(tensor_name, pattern_ffn_gate_shexp_weight) ||
+                 std::regex_match(tensor_name, pattern_ffn_down_shexp_weight)) {
+-            const int64_t blck_size_perf = std::lcm(blck_size, 128);
++            const int64_t blck_size_perf = std::lcm(blck_size, llama_tp_ffn_gran());
+             GGML_ASSERT(segments.size() == 1);
+             return {blck_size_perf};
+         }
+@@ -876,6 +889,15 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
+         const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
+         const float * tensor_split = ud->model->tensor_split();
++        const bool is_ffn = std::regex_match(tensor_name, pattern_ffn_up_weight) || std::regex_match(tensor_name, pattern_ffn_up_bias) ||
++            std::regex_match(tensor_name, pattern_ffn_gate_weight) || std::regex_match(tensor_name, pattern_ffn_gate_bias) ||
++            std::regex_match(tensor_name, pattern_ffn_gate_up_weight) || std::regex_match(tensor_name, pattern_ffn_down_weight) ||
++            std::regex_match(tensor_name, pattern_ffn_up_shexp_weight) || std::regex_match(tensor_name, pattern_ffn_gate_shexp_weight) ||
++            std::regex_match(tensor_name, pattern_ffn_down_shexp_weight);
++        const float ffn_split[2] = {llama_tp_ffn_split(), 1.0f - llama_tp_ffn_split()};
++        if (is_ffn && ud->n_devices == 2 && ffn_split[0] > 0.0f && ffn_split[0] < 1.0f) {
++            tensor_split = ffn_split;
++        }
+         std::vector<float> tensor_split_scan;
+         tensor_split_scan.reserve(ud->n_devices);
+         for (size_t j = 0; j < ud->n_devices; j++) {
+@@ -905,6 +927,16 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+             split_state.nr[is] = nr_s;
+         }
+         split_state.n_segments = segments.size();
++        static const bool dbg = getenv("LLAMA_TP_SPLIT_DEBUG") != nullptr;
++        if (dbg && tc.il < 4) {
++            std::string s;
++            for (size_t is = 0; is < segments.size(); is++) {
++                for (size_t j = 0; j < ud->n_devices; j++) {
++                    s += (j == 0 ? (is == 0 ? "" : " |") : "/") + std::to_string(split_state.ne[is*ud->n_devices + j]);
++                }
++            }
++            LLAMA_LOG_INFO("%s: tp split %-32s axis %d: %s\n", __func__, tensor_name.c_str(), (int) split_state.axis, s.c_str());
++        }
+     } else {
+         memset(split_state.ne, 0, sizeof(split_state.ne));
+         split_state.nr[0] = 1;
