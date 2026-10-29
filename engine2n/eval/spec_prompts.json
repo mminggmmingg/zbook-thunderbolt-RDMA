@@ -1,0 +1,8 @@
+[
+  {"id": "prose", "text": "Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle."},
+  {"id": "code", "text": "Write a Python function that parses a CSV file of transactions (date, account, amount) and returns the monthly balance per account. Include type hints and a short docstring."},
+  {"id": "ko", "text": "썬더볼트 케이블로 연결한 두 노트북에서 큰 언어 모델을 텐서 병렬로 나눠 돌릴 때 생기는 통신 병목을 초보자에게 설명해 줘."},
+  {"id": "math", "text": "A train leaves at 9:40 and travels 156 km at 72 km/h, then waits 18 minutes, then travels 90 km at 60 km/h. When does it arrive? Explain step by step."},
+  {"id": "json", "text": "Convert this to JSON with fields name, role, years: Alice is a backend engineer with 7 years of experience; Bob is a designer with 3 years; Carol is a data scientist with 5 years; Dan is an SRE with 9 years."},
+  {"id": "summary", "text": "Summarize the main differences between TCP and UDP in a bullet list, then give one example application for each."}
+]

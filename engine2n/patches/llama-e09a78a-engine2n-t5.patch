@@ -1,8 +1,112 @@
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 6b36ca9..8b32e21 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -1274,6 +1274,7 @@ struct ggml_cuda_graph {
+     std::vector<cudaGraphNode_t> nodes;
+     bool disable_due_to_gpu_arch = false;
+     bool warmup_complete = false;
++    std::vector<std::string> prof_desc;  // GGML_CUDA_GRAPH_PROF: node count and types per chunk, for slow replays
+     uint64_t uid = 0;
+     int64_t last_used_time = 0;
+     struct node_properties {
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 72e961d..d3135ae 100644
+index 72e961d..c142790 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -6282,8 +6282,40 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -2884,10 +2884,53 @@ static int ggml_cuda_graph_chunk_size() {
+ }
+ 
+ // end the capture of chunk `idx`, update or create its executable and launch it
++// GGML_CUDA_GRAPH_PROF=<us>: time graph updates and launches (capture and replay), sum them every 1000 launches and
++// log the ones over <us> with the node count per node type
++static int64_t ggml_cuda_graph_prof_us() {
++    static const int64_t v = [] {
++        const char * env = getenv("GGML_CUDA_GRAPH_PROF");
++        return env != nullptr ? (int64_t) atoll(env) : (int64_t) -1;
++    }();
++    return v;
++}
++
++static void ggml_cuda_graph_prof_add(const char * kind, int64_t t_upd, int64_t t_launch, const std::string & desc) {
++    const int64_t lim = ggml_cuda_graph_prof_us();
++    static int64_t s_upd = 0, s_launch = 0, n_calls = 0, n_slow = 0;
++    static int n_logged = 0;
++    s_upd += t_upd; s_launch += t_launch;
++    const bool slow = std::max(t_upd, t_launch) > lim;
++    n_slow += slow;
++    if (slow && n_logged < 60) {
++        n_logged++;
++        GGML_LOG_INFO("[graph_prof] %s: update %lld us, launch %lld us, %s\n", kind, (long long) t_upd, (long long) t_launch, desc.c_str());
++    }
++    if (++n_calls % 1000 == 0) {
++        GGML_LOG_INFO("[graph_prof] %lld launches: avg update %.1f us, avg launch %.1f us, %lld over %lld us\n",
++                      (long long) n_calls, (double) s_upd / 1000, (double) s_launch / 1000, (long long) n_slow, (long long) lim);
++        s_upd = s_launch = n_slow = 0;
++    }
++}
++
+ static void ggml_cuda_graph_launch_chunk(ggml_backend_cuda_context * cuda_ctx, ggml_cuda_graph * graph, size_t idx) {
+     cudaGraph_t cuda_graph = nullptr;
+     CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &cuda_graph));
+ 
++    const int64_t graph_prof_us = ggml_cuda_graph_prof_us();
++    int    node_types[16] = {};
++    size_t n_nodes        = 0;
++    if (graph_prof_us >= 0) {
++        CUDA_CHECK(cudaGraphGetNodes(cuda_graph, nullptr, &n_nodes));
++        std::vector<cudaGraphNode_t> nodes(n_nodes);
++        CUDA_CHECK(cudaGraphGetNodes(cuda_graph, nodes.data(), &n_nodes));
++        for (cudaGraphNode_t node : nodes) {
++            cudaGraphNodeType type;
++            CUDA_CHECK(cudaGraphNodeGetType(node, &type));
++            node_types[std::min<int>((int) type, 15)]++;
++        }
++    }
++    const int64_t t0 = graph_prof_us >= 0 ? ggml_time_us() : 0;
++
+     if (idx < graph->instances.size()) {
+         ggml_cuda_graph_update_executable(graph->instances[idx], cuda_graph);
+     } else {
+@@ -2897,7 +2940,22 @@ static void ggml_cuda_graph_launch_chunk(ggml_backend_cuda_context * cuda_ctx, g
+     }
+     CUDA_CHECK(cudaGraphDestroy(cuda_graph));
+ 
++    const int64_t t1 = graph_prof_us >= 0 ? ggml_time_us() : 0;
+     CUDA_CHECK(cudaGraphLaunch(graph->instances[idx], cuda_ctx->stream()));
++    if (graph_prof_us >= 0) {
++        const int64_t t2 = ggml_time_us();
++        std::string desc = "chunk " + std::to_string(idx) + ", " + std::to_string(n_nodes) + " nodes:";
++        for (int i = 0; i < 16; i++) {
++            if (node_types[i] != 0) {
++                desc += " t" + std::to_string(i) + "=" + std::to_string(node_types[i]);
++            }
++        }
++        if (graph->prof_desc.size() <= idx) {
++            graph->prof_desc.resize(idx + 1);
++        }
++        graph->prof_desc[idx] = desc;
++        ggml_cuda_graph_prof_add("capture", t1 - t0, t2 - t1, desc);
++    }
+ }
+ #endif // USE_CUDA_GRAPH
+ 
+@@ -4878,8 +4936,12 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+ 
+     if (use_cuda_graph && !cuda_graph_update_required) {
+         // the chunks were launched during capture, otherwise launch them here
+-        for (cudaGraphExec_t instance : graph->instances) {
+-            CUDA_CHECK(cudaGraphLaunch(instance, cuda_ctx->stream()));
++        for (size_t i = 0; i < graph->instances.size(); i++) {
++            const int64_t t0 = ggml_cuda_graph_prof_us() >= 0 ? ggml_time_us() : 0;
++            CUDA_CHECK(cudaGraphLaunch(graph->instances[i], cuda_ctx->stream()));
++            if (ggml_cuda_graph_prof_us() >= 0) {
++                ggml_cuda_graph_prof_add("replay", 0, ggml_time_us() - t0, i < graph->prof_desc.size() ? graph->prof_desc[i] : std::string("?"));
++            }
+         }
+ #else
+         GGML_UNUSED(graph_key);
+@@ -6282,8 +6344,40 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -1154,3 +1258,20 @@ index 81af890..e00bf28 100644
      } else {
          memset(split_state.ne, 0, sizeof(split_state.ne));
          split_state.nr[0] = 1;
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index c3e2b01..6327263 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -808,6 +808,12 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
+     inp->new_pool_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 4*inp->n_new);
+     ggml_set_input(inp->new_pool_pos);
+ 
++    // likewise for the rest: a graph without QSA layers (the MTP head, compress ratio 0) reads none of them
++    ggml_build_forward_expand(gf, inp->k_idxs);
++    ggml_build_forward_expand(gf, inp->new_pool_idxs);
++    ggml_build_forward_expand(gf, inp->new_pool_rep);
++    ggml_build_forward_expand(gf, inp->new_pool_pos);
++
+     return (llm_graph_input_kpool *) res->add_input(std::move(inp));
+ }
+ 

@@ -36,6 +36,12 @@ git -C llama.cpp apply ../patches/llama-e09a78a-engine2n-t5.patch     # engine2n
 ./run_tp.sh <GGUF|iq4> local                 # A 혼자 TP 점검(rpc-server 2개)
 ./run_tp.sh <GGUF|iq4> 2node [rdma|tcp]      # 2노드 TP: --rpc 10.99.0.2:50052,127.0.0.1:50052 (B = rank 0)
 ./eval_ppl.sh <GGUF> 1node|tplocal|tp2node   # 정합성(perplexity)
+./run_server.sh 1node|2node none|mtp [N]      # llama-server 실측(추측 디코딩 포함), 프롬프트 eval/spec_prompts.json
+```
+MTP(추측 디코딩): `./get_models.sh mtp` 로 받는 공유형 MTP 파일은 본 모델의 `token_embd`·`output` 을 빌려 쓰는 형식이라 이 llama.cpp 가 단독으로 못 연다.
+본 모델 조각에서 두 텐서를 붙인 파일을 만들어 쓴다:
+```
+python3 -I tools/gguf_merge_mtp.py <MTP/mtp-...-shared-Q8_0.gguf> <UD-IQ4_XS/...-00002-of-00003.gguf> <MTP/mtp-...-merged-IQ4embd.gguf> token_embd.weight output.weight
 ```
 주의: B 를 rank 0 으로 둔다 — A 서버를 TB 주소로 등록하면 클라이언트↔A 서버가 tbv 루프백으로 협상되는데 tbv 는 같은 노드 안 QP 를 못 잇는다.
 tbv 는 `9a35117`(여러 프레임 SEND 의 RNR 대기) 이상이어야 한다.
