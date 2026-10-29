@@ -1,18 +1,131 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 72e961d..4b76613 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -6282,8 +6282,25 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+     GGML_UNUSED(reg);
+ }
+ 
++// Queue a wait on the backend's stream: later work on it starts only once *ptr >= value. ptr must be
++// pinned host memory the device can read (e.g. from the host buffer type). Used by the RPC server to
++// launch the next subgraph while the peer's allreduce partial is still on the wire.
++static bool ggml_backend_cuda_stream_wait_u32(ggml_backend_t backend, void * ptr, uint32_t value) {
++#if defined(GGML_USE_HIP)
++    ggml_backend_cuda_context * ctx = (ggml_backend_cuda_context *) backend->context;
++    ggml_cuda_set_device(ctx->device);
++    return hipStreamWaitValue32(ctx->stream(), ptr, value, hipStreamWaitValueGte, 0xFFFFFFFF) == hipSuccess;
++#else
++    GGML_UNUSED(backend); GGML_UNUSED(ptr); GGML_UNUSED(value);
++    return false;
++#endif
++}
++
+ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+     GGML_UNUSED(reg);
++    if (strcmp(name, "ggml_backend_stream_wait_u32") == 0) {
++        return (void *)ggml_backend_cuda_stream_wait_u32;
++    }
+     if (strcmp(name, "ggml_backend_comm_init") == 0) {
+         return (void *)ggml_backend_cuda_comm_init;
+     }
 diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
-index 8cedee7..ecc93eb 100644
+index 8cedee7..da70742 100644
 --- a/ggml/src/ggml-rpc/ggml-rpc.cpp
 +++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
-@@ -1444,6 +1444,9 @@ private:
+@@ -1388,6 +1388,63 @@ void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device,
+ 
+ // RPC server-side implementation
+ 
++// Receives the peer's allreduce partial on its own thread and releases the stream wait as soon as it
++// lands, so the main thread can launch the next subgraph meanwhile (GGML_RPC_COMM_OVERLAP=2).
++// The comm socket is used by one side at a time: the main thread sends and flushes, then hands the
++// receive here, and waits for it to finish before touching the socket again.
++struct comm_recv_helper {
++    socket_ptr              peer;
++    std::thread             th;
++    std::atomic<uint32_t>   job_seq{0};
++    std::atomic<uint32_t>   done_seq{0};
++    std::atomic<bool>       stop{false};
++    std::atomic<bool>       failed{false};
++    uint8_t *               rbuf = nullptr;
++    size_t                  bytes = 0;
++    volatile uint32_t *     flag = nullptr;
++
++    explicit comm_recv_helper(socket_ptr p) : peer(std::move(p)) {
++        th = std::thread([this] {
++            uint32_t done = 0;
++            while (!stop.load(std::memory_order_acquire)) {
++                const uint32_t job = job_seq.load(std::memory_order_acquire);
++                if (job == done) {
++#if defined(__x86_64__) || defined(__i386__)
++                    __builtin_ia32_pause();
++#endif
++                    continue;
++                }
++                if (!peer->recv_data(rbuf, bytes)) {
++                    failed.store(true, std::memory_order_release);
++                    done_seq.store(job, std::memory_order_release);
++                    return;
++                }
++                __atomic_store_n((uint32_t *) flag, job, __ATOMIC_SEQ_CST);  // releases the queued copy + add
++                done = job;
++                done_seq.store(job, std::memory_order_release);
++            }
++        });
++    }
++    void submit(uint8_t * buf, size_t n, volatile uint32_t * f, uint32_t seq) {
++        rbuf = buf; bytes = n; flag = f;
++        job_seq.store(seq, std::memory_order_release);
++    }
++    bool wait(uint32_t seq) {
++        while (done_seq.load(std::memory_order_acquire) != seq) {
++#if defined(__x86_64__) || defined(__i386__)
++            __builtin_ia32_pause();
++#endif
++        }
++        return !failed.load(std::memory_order_acquire);
++    }
++    ~comm_recv_helper() {
++        stop.store(true, std::memory_order_release);
++        if (th.joinable()) {
++            th.join();
++        }
++    }
++};
++
+ class rpc_server {
+ public:
+     rpc_server(std::vector<ggml_backend_t> all_backends, const char * cache_dir)
+@@ -1415,6 +1472,8 @@ public:
+     bool graph_recompute(const rpc_msg_graph_recompute_req & request);
+     bool comm_init(const rpc_msg_comm_init_req & request, rpc_msg_comm_init_rsp & response);
+     bool comm_allreduce(const rpc_msg_comm_allreduce_req & request);
++    // receive any deferred allreduce partials and release the stream waits (before anything that may block)
++    bool comm_flush_pending();
+     bool comm_free(const rpc_msg_comm_free_req & request);
+     bool init_tensor(const rpc_msg_init_tensor_req & request);
+     bool get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_msg_get_alloc_size_rsp & response);
+@@ -1444,7 +1503,19 @@ private:
          size_t                  scratch_size = 0;
          std::vector<uint8_t>    send_buf;
          std::vector<uint8_t>    recv_buf;
 +        // pinned host staging (device host buffer type) so the partial moves with async copies
 +        ggml_backend_buffer_ptr host;
 +        size_t                  host_size = 0;
++        // overlap mode: the peer's partial for the last allreduce is received later; the stream waits
++        // on *flag >= seq before copying it in, so the next subgraph can be launched meanwhile
++        volatile uint32_t *     flag = nullptr;
++        uint32_t                seq = 0;
++        uint8_t *               pending_rbuf = nullptr;
++        size_t                  pending_bytes = 0;
++        bool                    pending_helper = false;  // the receive was handed to the helper thread
++        std::unique_ptr<comm_recv_helper> helper;        // declared after peer: stopped before it is released
      };
++    bool comm_complete_pending(comm_state & state);
  
      std::vector<ggml_backend_t> backends;
-@@ -2284,6 +2287,57 @@ bool rpc_server::comm_init(const rpc_msg_comm_init_req & request, rpc_msg_comm_i
+     const char * cache_dir;
+@@ -2284,6 +2355,57 @@ bool rpc_server::comm_init(const rpc_msg_comm_init_req & request, rpc_msg_comm_i
      return true;
  }
  
@@ -37,14 +150,14 @@ index 8cedee7..ecc93eb 100644
 +    }
 +    return g_comm_prof.every;
 +}
-+static void comm_prof_add(int64_t t0, int64_t t1, int64_t t2, int64_t t3, int64_t t4, size_t wire_bytes) {
++static void comm_prof_add(int64_t t_entry, int64_t t_end, int64_t sync, int64_t d2h, int64_t net, int64_t h2d, size_t wire_bytes) {
 +    comm_prof_state & p = g_comm_prof;
 +    if (p.last_end != 0) {
-+        p.t_gap += t0 - p.last_end;
++        p.t_gap += t_entry - p.last_end;
 +    }
-+    p.t_sync += t1 - t0; p.t_d2h += t2 - t1; p.t_net += t3 - t2; p.t_h2d += t4 - t3;
++    p.t_sync += sync; p.t_d2h += d2h; p.t_net += net; p.t_h2d += h2d;
 +    p.bytes += wire_bytes;
-+    p.last_end = t4;
++    p.last_end = t_end;
 +    if (++p.n % (uint64_t) p.every == 0) {
 +        const double k = 1.0 / p.every;
 +        LOG_INFO("[comm_prof] %d calls, avg us: gap %.1f sync %.1f d2h %.1f net %.1f h2d+add %.1f | avg wire %.0f B\n",
@@ -70,7 +183,25 @@ index 8cedee7..ecc93eb 100644
  bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
      if (request.device >= backends.size()) {
          return false;
-@@ -2324,8 +2378,22 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2294,6 +2416,12 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+         return false;
+     }
+     ggml_backend_t backend = backends[request.device];
++    const int64_t t_entry = comm_prof_every() > 0 ? ggml_time_us() : 0;
++    // the previous allreduce may still owe its receive (overlap mode): finish it before this one
++    if (!comm_complete_pending(state)) {
++        return false;
++    }
++    const int64_t t_pending = comm_prof_every() > 0 ? ggml_time_us() : 0;
+ 
+     size_t ctx_size = 16*ggml_tensor_overhead() + 2*ggml_graph_overhead_custom(8, false);
+     struct ggml_init_params params = {
+@@ -2320,12 +2448,34 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+     const size_t wire_bytes = wire_bf16 ? (size_t) ne*2 : nbytes;
+     const size_t need       = wire_bf16 ? 2*nbytes : nbytes;
+     if (state.scratch_size < need) {
++        ggml_backend_synchronize(backend);  // the old scratch may still be read by queued work
+         state.scratch.reset(ggml_backend_alloc_buffer(backend, need));
          state.scratch_size = need;
      }
      char * scratch_base = (char *) ggml_backend_buffer_get_base(state.scratch.get());
@@ -79,13 +210,20 @@ index 8cedee7..ecc93eb 100644
 +    uint8_t * sbuf = nullptr;
 +    uint8_t * rbuf = nullptr;
 +    if (state.host_size < 2*wire_bytes) {
++        ggml_backend_synchronize(backend);  // the old staging may still feed a queued copy
 +        ggml_backend_buffer_type_t host_buft = ggml_backend_dev_host_buffer_type(ggml_backend_get_device(backend));
-+        state.host.reset(host_buft ? ggml_backend_buft_alloc_buffer(host_buft, 2*wire_bytes) : nullptr);
++        state.host.reset(host_buft ? ggml_backend_buft_alloc_buffer(host_buft, 2*wire_bytes + 64) : nullptr);
 +        state.host_size = state.host ? 2*wire_bytes : 0;
++        state.flag = nullptr;
++        if (state.host) {
++            uint8_t * base = (uint8_t *) ggml_backend_buffer_get_base(state.host.get());
++            state.flag  = (volatile uint32_t *) (base + state.host_size);   // after the two halves
++            *state.flag = state.seq;
++        }
 +    }
 +    if (state.host) {
 +        sbuf = (uint8_t *) ggml_backend_buffer_get_base(state.host.get());
-+        rbuf = sbuf + wire_bytes;
++        rbuf = sbuf + state.host_size/2;
 +    } else {
 +        state.send_buf.resize(wire_bytes);
 +        state.recv_buf.resize(wire_bytes);
@@ -95,7 +233,7 @@ index 8cedee7..ecc93eb 100644
  
      auto new_scratch_tensor = [&](ggml_type type, size_t offset) {
          ggml_tensor * t = ggml_new_tensor_4d(ctx, type, t_dst->ne[0], t_dst->ne[1], t_dst->ne[2], t_dst->ne[3]);
-@@ -2352,41 +2420,61 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2352,41 +2502,116 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
          GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
      };
  
@@ -104,6 +242,13 @@ index 8cedee7..ecc93eb 100644
 -
 +    const bool prof = comm_prof_every() > 0;
 +    const int64_t t0 = prof ? ggml_time_us() : 0;
++    static const int overlap_env = [] {
++        const char * env = getenv("GGML_RPC_COMM_OVERLAP");
++        return env != nullptr ? atoi(env) : 0;
++    }();
++    typedef bool (*stream_wait_u32_t)(ggml_backend_t, void *, uint32_t);
++    static const stream_wait_u32_t stream_wait = (stream_wait_u32_t) ggml_backend_reg_get_proc_address(
++        ggml_backend_dev_backend_reg(ggml_backend_get_device(backend)), "ggml_backend_stream_wait_u32");
 +    // queue the read behind the pending subgraph that produced this partial, then wait once
      ggml_tensor * t_wire_send = nullptr;
      ggml_tensor * t_wire_recv = nullptr;
@@ -123,16 +268,60 @@ index 8cedee7..ecc93eb 100644
 -    if (state.rank == 0) {
 -        if (!state.peer->send_data(state.send_buf.data(), wire_bytes) || !state.peer->flush() ||
 -            !state.peer->recv_data(state.recv_buf.data(), wire_bytes)) {
--            return false;
--        }
--    } else {
--        if (!state.peer->recv_data(state.recv_buf.data(), wire_bytes) ||
--            !state.peer->send_data(state.send_buf.data(), wire_bytes) || !state.peer->flush()) {
--            return false;
 +    ggml_backend_synchronize(backend);
 +    const int64_t t1 = prof ? ggml_time_us() : 0;
 +
 +    const int64_t t2 = t1;
++    // overlap mode (decode-sized f32 partials): send ours now, and let the stream wait on the flag for
++    // the peer's; the receive happens at the next allreduce or before any command that may block.
++    static const size_t sym_max_ov = [] {
++        const char * env = getenv("GGML_RPC_COMM_SYM_MAX");
++        return env ? (size_t) atoll(env) : (size_t) 65536;
++    }();
++    if (overlap_env && stream_wait != nullptr && state.flag != nullptr && !wire_bf16 && wire_bytes <= sym_max_ov) {
++        if (!state.peer->send_data(sbuf, wire_bytes) || !state.peer->flush()) {
+             return false;
+         }
+-    } else {
+-        if (!state.peer->recv_data(state.recv_buf.data(), wire_bytes) ||
+-            !state.peer->send_data(state.send_buf.data(), wire_bytes) || !state.peer->flush()) {
++        const int64_t t3o = prof ? ggml_time_us() : 0;
++        const uint32_t seq = state.seq + 1;
++        if (!stream_wait(backend, (void *) state.flag, seq)) {
++            LOG_ERROR("[%s] stream wait failed, overlap disabled for this call\n", __func__);
++        } else {
++            state.seq = seq;
++            ggml_tensor * t_peer_o = new_scratch_tensor(t_dst->type, 0);
++            ggml_backend_tensor_set_async(backend, t_peer_o, rbuf, 0, wire_bytes);
++            ggml_tensor * t_red_o = ggml_new_tensor_4d(ctx, t_dst->type, t_dst->ne[0], t_dst->ne[1], t_dst->ne[2], t_dst->ne[3]);
++            t_red_o->op     = GGML_OP_ADD;
++            t_red_o->src[0] = t_dst;
++            t_red_o->src[1] = t_peer_o;
++            t_red_o->buffer = t_dst->buffer;
++            t_red_o->data   = t_dst->data;
++            t_red_o->flags |= GGML_TENSOR_FLAG_COMPUTE;
++            compute_nodes(t_red_o, nullptr);
++            state.pending_rbuf   = rbuf;
++            state.pending_bytes  = wire_bytes;
++            state.pending_helper = false;
++            if (overlap_env >= 2) {
++                if (!state.helper) {
++                    state.helper = std::make_unique<comm_recv_helper>(state.peer);
++                }
++                state.helper->submit(rbuf, wire_bytes, state.flag, seq);
++                state.pending_helper = true;
++            }
++            if (prof) {
++                const int64_t t_end = ggml_time_us();
++                comm_prof_add(t_entry, t_end, t1 - t0, 0, (t_pending - t_entry) + (t3o - t2), t_end - t3o, wire_bytes);
++            }
++            return true;
++        }
++        // the wait could not be queued: fall back to receiving now (ours is already sent)
++        if (!state.peer->recv_data(rbuf, wire_bytes)) {
+             return false;
+         }
++    } else {
 +    // both ranks send, then receive, in pieces of at most sym_max bytes: one one-way latency for a decode-sized
 +    // partial, full duplex for a large one. Over RDMA up to `ahead` pieces may be in flight (the peer's pre-posted
 +    // receives hold them); over TCP one piece at a time so neither side can block in send while the other does too.
@@ -160,7 +349,8 @@ index 8cedee7..ecc93eb 100644
 +                return false;
 +            }
 +            recvd += n;
-         }
++        }
++    }
      }
  
 +    const int64_t t3 = prof ? ggml_time_us() : 0;
@@ -176,17 +366,44 @@ index 8cedee7..ecc93eb 100644
      }
  
      ggml_tensor * t_red = ggml_new_tensor_4d(ctx, t_dst->type, t_dst->ne[0], t_dst->ne[1], t_dst->ne[2], t_dst->ne[3]);
-@@ -2402,6 +2490,9 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
+@@ -2402,6 +2627,36 @@ bool rpc_server::comm_allreduce(const rpc_msg_comm_allreduce_req & request) {
      } else {
          compute_nodes(t_red, nullptr);
      }
 +    if (prof) {
-+        comm_prof_add(t0, t1, t2, t3, ggml_time_us(), wire_bytes);
++        const int64_t t_end = ggml_time_us();
++        comm_prof_add(t_entry, t_end, t1 - t0, 0, (t_pending - t_entry) + (t3 - t2), t_end - t3, wire_bytes);
++    }
++    return true;
++}
++
++bool rpc_server::comm_complete_pending(comm_state & state) {
++    if (state.pending_bytes == 0) {
++        return true;
++    }
++    if (state.pending_helper) {
++        state.pending_bytes  = 0;
++        state.pending_helper = false;
++        return state.helper->wait(state.seq);
++    }
++    if (!state.peer->recv_data(state.pending_rbuf, state.pending_bytes)) {
++        return false;
++    }
++    state.pending_bytes = 0;
++    __atomic_store_n((uint32_t *) state.flag, state.seq, __ATOMIC_SEQ_CST);  // releases the queued copy + add
++    return true;
++}
++
++bool rpc_server::comm_flush_pending() {
++    for (auto & state : comm_states) {
++        if (state.peer != nullptr && !comm_complete_pending(state)) {
++            return false;
++        }
 +    }
      return true;
  }
  
-@@ -2474,10 +2565,27 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+@@ -2474,10 +2729,31 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
      // Activate transport upgrade using client's caps
      sock->update_caps(req.conn_caps);
      LOG_DBG("[%s] client connected, transport: %s\n", __func__, sock->transport_name());
@@ -210,6 +427,10 @@ index 8cedee7..ecc93eb 100644
 +            g_comm_prof.n_cmd[cmd]++;
 +            prof_t   = t;
 +            prof_cmd = cmd;
++        }
++        if (cmd != RPC_CMD_GRAPH_COMPUTE && cmd != RPC_CMD_GRAPH_RECOMPUTE && cmd != RPC_CMD_COMM_ALLREDUCE &&
++                !server.comm_flush_pending()) {
++            break;
 +        }
          if (cmd >= RPC_CMD_COUNT) {
              // fail fast if the command is invalid

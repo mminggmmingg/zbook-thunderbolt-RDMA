@@ -26,7 +26,7 @@ case $TOPO in
          DEVS="RPC0/RPC1"; RPC=127.0.0.1:50052,127.0.0.1:50053 ;;
   2node) start_local 50052 127.0.0.1
          ssh -o BatchMode=yes $B "mkdir -p $BBIN; pkill -x ggml-rpc-server; sleep 1"; scp -q "$BIN/ggml-rpc-server" "$B:$BBIN/" || exit 3
-         ssh -o BatchMode=yes $B "cd $BBIN && LD_LIBRARY_PATH=/opt/rocm/lib GGML_RDMA_RX_DEPTH=$GGML_RDMA_RX_DEPTH GGML_RDMA_CHUNK=$GGML_RDMA_CHUNK GGML_RDMA_TX_SLOTS=$GGML_RDMA_TX_SLOTS GGML_RPC_COMM_PROF=${GGML_RPC_COMM_PROF:-0} $NORDMA setsid -f ./ggml-rpc-server -H 10.99.0.2 -p 50052 -c > rpc-server.log 2>&1 < /dev/null"
+         ssh -o BatchMode=yes $B "cd $BBIN && LD_LIBRARY_PATH=/opt/rocm/lib GGML_RDMA_RX_DEPTH=$GGML_RDMA_RX_DEPTH GGML_RDMA_CHUNK=$GGML_RDMA_CHUNK GGML_RDMA_TX_SLOTS=$GGML_RDMA_TX_SLOTS GGML_RPC_COMM_PROF=${GGML_RPC_COMM_PROF:-0} GGML_RPC_COMM_OVERLAP=${GGML_RPC_COMM_OVERLAP:-0} $NORDMA setsid -f ./ggml-rpc-server -H 10.99.0.2 -p 50052 -c > rpc-server.log 2>&1 < /dev/null"
          DEVS="RPC0/RPC1"; RPC=10.99.0.2:50052,127.0.0.1:50052 ;;
   *) echo "모름: $TOPO"; exit 2 ;;
 esac
