@@ -1,0 +1,6 @@
+llama.cpp/
+llama.cpp-*/
+runs/
+eval/ppl_text.txt
+build-*.log
+cmake-hip.log
