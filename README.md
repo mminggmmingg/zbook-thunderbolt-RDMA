@@ -186,3 +186,8 @@ halogen 은 소스 비공개(바이너리 배포)다. 라이선스는 리버스 
 수정한 이미지나 거기서 나온 커널·소스의 배포는 금지한다 — 2노드 halogen 결과물은 비공개로 둔다.
 
 그 밖에: 출력 오염 결함이 6.17 커널에서도 있었는지 확인.
+
+## 라이선스
+
+GPL-3.0 — [LICENSE](LICENSE). Copyright (C) 2026 mminggmmingg. 고쳐서 배포할 때도 같은 GPL-3.0 으로 소스를 공개해야 한다.
+서브모듈은 각자의 라이선스를 따른다: `tbv/`(thunderbolt-ibverbs-zbook) GPL-2.0, `libtbvcoll/` GPL-3.0.
